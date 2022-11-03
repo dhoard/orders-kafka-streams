@@ -185,7 +185,7 @@ public class Main {
                 .peek((k, v) -> LOGGER.info(String.format("order.info [%s] = [%s]", k, v)))
                 .to("order-info");
 
-        // re-key order.info events to use facility.info event
+        // re-key order.info events to into facility.info events
         streamsBuilder
                 .stream("order-info", Consumed.with(keySerdes, valueSerdes))
                 .filter((s, jsonObject) -> jsonObject != null)
