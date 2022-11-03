@@ -60,7 +60,7 @@ Output event :
 }
 ```
 
-`processing.ms` - count of orders processed within a facility within the last minute
+`processing.count` - count of orders processed within a facility within the last minute
 
 `processing.ms` - sum of processing time for orders within a facility within the last minute
 
