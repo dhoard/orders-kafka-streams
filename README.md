@@ -17,7 +17,7 @@ Topics required :
 
 ---
 
-Source topic:
+Source topic :
 
 `order`
 
@@ -44,3 +44,24 @@ Source events :
 	"order.id": "dc16fa3c-1beb-4992-8c27-173856fb0cdf"
 }
 ```
+
+Output topic :
+
+`facility-info-by-minute`
+
+Output event :
+
+```
+{
+  "event.type": "facility.info",
+  "facility.id": "facility-1",
+  "processing.count": 13,
+  "processing.ms": 613
+}
+```
+
+`processing.ms` - count of orders processed within a facility within the last minute
+
+`processing.ms` - sum of processing time for orders within a facility within the last minute
+
+
