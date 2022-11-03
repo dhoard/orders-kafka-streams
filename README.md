@@ -17,6 +17,10 @@ Topics required :
 
 ---
 
+Source topic:
+
+`order`
+
 Source events :
 
 `order.placed` event
