@@ -100,7 +100,8 @@ public class Main {
                 @Override
                 public void onRestoreEnd(TopicPartition topicPartition, String storeName, long totalRestored) {
                     LOGGER.info(
-                            String.format("onRestoreEnd() topicPartition [%s] storeName [%s] totalRestored [%d]",
+                            String.format(
+                                    "onRestoreEnd() topicPartition [%s] storeName [%s] totalRestored [%d]",
                                     topicPartition.partition(),
                                     storeName,
                                     totalRestored));
@@ -116,7 +117,7 @@ public class Main {
 
         // convert order events without a key to order events with a key
         streamsBuilder
-                .stream("orders", Consumed.with(keySerdes, valueSerdes))
+                .stream("order", Consumed.with(keySerdes, valueSerdes))
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
                 .map((key, jsonObject) -> {
                     key = jsonObject.get("order.id").getAsString();
@@ -124,11 +125,11 @@ public class Main {
                     return new KeyValue<>(key, result);
                 })
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
-                .to("orders-keyed");
+                .to("order-keyed");
 
         // aggregate order events by order.id (order.placed + order.completed) and generate an order.info event
         streamsBuilder
-                .stream("orders-keyed", Consumed.with(keySerdes, valueSerdes))
+                .stream("order-keyed", Consumed.with(keySerdes, valueSerdes))
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
                 .groupByKey()
                 .aggregate(
