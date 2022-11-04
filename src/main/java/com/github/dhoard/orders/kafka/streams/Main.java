@@ -84,14 +84,14 @@ public class Main {
         kafkaStreams.setGlobalStateRestoreListener(
             new StateRestoreListener() {
                 @Override
-                public void onRestoreStart(TopicPartition topicPartition, String storeName, long startingOffset, long endingOffest) {
+                public void onRestoreStart(TopicPartition topicPartition, String storeName, long startingOffset, long endingOffset) {
                     LOGGER.info(
                             String.format(
-                                    "onRestoreStart() topicPartition [%s] storeName [%s] offset [%d]",
+                                    "onRestoreStart() topicPartition [%s] storeName [%s] startingOffset [%d] endingOffset [%d]",
                                     topicPartition.partition(),
                                     storeName,
                                     startingOffset,
-                                    endingOffest));
+                                    endingOffset));
                 }
 
                 @Override
