@@ -1,6 +1,7 @@
 package com.github.dhoard.orders.kafka.streams;
 
 import com.github.dhoard.orders.kafka.streams.serde.JsonObjectSerde;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -14,6 +15,7 @@ import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
 import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.streams.kstream.KeyValueMapper;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.Suppressed;
@@ -30,9 +32,9 @@ public class Main {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Main.class);
 
-    private static final Serde<String> keySerdes = Serdes.String();
+    private static final Serde<String> stringSerde = Serdes.String();
 
-    private static final Serde<JsonObject> valueSerdes = new JsonObjectSerde();
+    private static final Serde<JsonObject> jsonObjectSerde = new JsonObjectSerde();
 
     public static void main(String[] args) {
         new Main().run();
@@ -43,8 +45,8 @@ public class Main {
 
         String bootstrapServers = "cp-7-2-x:9092";
         String applicationId = "orders";
-        Class<?> keySerde = keySerdes.getClass();
-        Class<?> valueSerde = valueSerdes.getClass();
+        Class<?> keySerde = stringSerde.getClass();
+        Class<?> valueSerde = jsonObjectSerde.getClass();
         String autoOffsetResetConfig = "earliest";
         int numStreamThreads = Runtime.getRuntime().availableProcessors() * 2;
         long cacheMaxBytesBuffering = 0;
@@ -117,145 +119,114 @@ public class Main {
 
         // convert order events without a key to order events with a key
         streamsBuilder
-                .stream("order", Consumed.with(keySerdes, valueSerdes))
+                .stream("order", Consumed.with(stringSerde, jsonObjectSerde))
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
-                .map((key, jsonObject) -> {
-                    key = jsonObject.get("order.id").getAsString();
-                    JsonObject result = jsonObject.deepCopy();
-                    return new KeyValue<>(key, result);
+                .map((k, v) -> {
+                    k = v.get("order.id").getAsString();
+                    JsonObject result = v.deepCopy();
+                    return new KeyValue<>(k, result);
                 })
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
                 .to("order-keyed");
 
         // aggregate order events by order.id (order.placed + order.completed) and generate an order.info event
         streamsBuilder
-                .stream("order-keyed", Consumed.with(keySerdes, valueSerdes))
+                .stream("order-keyed", Consumed.with(stringSerde, jsonObjectSerde))
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
                 .groupByKey()
                 .aggregate(
                         JsonObject::new,
-                        (key, jsonObject, aggregateJsonObject) -> {
-                            // if the aggregated order object is empty, use the order object
-                            if (aggregateJsonObject.size() == 0) {
-                                JsonElement jsonElement = jsonObject.get("event.type");
-                                if (jsonElement == null) {
-                                    // bad message, ignore
-                                    return null;
-                                }
-
-                                if ("order.placed".equals(jsonElement.getAsString())) {
-                                    // order.placed event
-                                    return jsonObject;
-                                }
-
-                                // unknown message, ignore
-                                return null;
+                        (k, v, a) -> {
+                            String eventType = v.get("event.type").getAsString();
+                            if (eventType.equals("order.placed")) {
+                                a.add("order.placed", v);
+                            } else if (eventType.equals("order.fulfilled")) {
+                                a.add("order.fulfilled", v);
                             }
-
-                            JsonElement jsonElement = jsonObject.get("event.type");
-
-                            if (jsonElement == null) {
-                                // bad message, ignore
-                                return null;
-                            }
-
-                            if ("order.fulfilled".equals(jsonElement.getAsString())) {
-                                // use "event.timestamp" from the event
-                                long orderPlacedTimestamp = aggregateJsonObject.get("event.timestamp").getAsLong();
-                                long orderCompletedTimestamp = jsonObject.get("event.timestamp").getAsLong();
-                                long processingMs = orderCompletedTimestamp - orderPlacedTimestamp;
-
-                                JsonObject result = new JsonObject();
-                                result.addProperty("event.type", "order.info");
-                                result.addProperty("facility.id", jsonObject.get("facility.id").getAsString());
-                                result.addProperty("order.id", jsonObject.get("order.id").getAsString());
-                                result.addProperty("processing.ms", processingMs);
-                                return result;
-                            }
-
-                            // unknown message, ignore
-                            return null;
-                        }, Materialized.as("order-state-store"))
-                .filterNot((k, v) -> v == null)
-                .filter((key, jsonObject) -> {
-                    // completion criteria, existence of "processing.ms"
-                    return jsonObject.has("processing.ms");
-                })
+                            return a;
+                        },
+                        Materialized.as("order-state-store"))
+                .filter((k, v) -> v != null)
+                .filter((k, v) -> v.has("order.placed") && v.has("order.fulfilled"))
                 .toStream()
+                .map((KeyValueMapper<String, JsonObject, KeyValue<String, JsonObject>>) (k, v) -> {
+                    JsonObject orderPlacedJsonObject = v.getAsJsonObject("order.placed");
+                    JsonObject orderFulfilledJsonObject = v.getAsJsonObject("order.fulfilled");
+
+                    String facilityId = orderFulfilledJsonObject.get("facility.id").getAsString();
+
+                    long orderPlacedTimestamp = orderPlacedJsonObject.get("event.timestamp").getAsLong();
+                    long orderFulfilledTimestamp = orderFulfilledJsonObject.get("event.timestamp").getAsLong();
+                    long processingMs = orderFulfilledTimestamp - orderPlacedTimestamp;
+
+                    JsonObject result = new JsonObject();
+                    result.addProperty("event.type", "order.info");
+                    result.addProperty("facility.id", facilityId);
+                    result.addProperty("order.id", k);
+                    result.addProperty("processing.ms", processingMs);
+
+                    return new KeyValue<>(k, result);
+                })
                 .peek((k, v) -> LOGGER.info(String.format("order.info [%s] = [%s]", k, v)))
                 .to("order-info");
 
         // re-key order.info events to into facility.info events
         streamsBuilder
-                .stream("order-info", Consumed.with(keySerdes, valueSerdes))
+                .stream("order-info", Consumed.with(stringSerde, jsonObjectSerde))
                 .filter((s, jsonObject) -> jsonObject != null)
                 .peek((k, v) -> LOGGER.info(String.format("order.info [%s] = [%s]", k, v)))
-                .map((key, jsonObject) -> {
+                .map((k, v) -> {
                     // re-key based on facility id
-                    key = jsonObject.get("facility.id").getAsString();
-                    JsonObject result = jsonObject.deepCopy();
+                    k = v.get("facility.id").getAsString();
+                    JsonObject result = v.deepCopy();
                     result.addProperty("event.type", "facility.info");
-                    return new KeyValue<>(key, result);
+                    return new KeyValue<>(k, result);
                 })
                 .peek((k, v) -> LOGGER.info(String.format("facility.info [%s] = [%s]", k, v)))
                 .to("facility-info");
 
         // aggregate facility.info events by facility.id with a 1-minute tumbling window
         streamsBuilder
-                .stream("facility-info", Consumed.with(keySerdes, valueSerdes))
+                .stream("facility-info", Consumed.with(stringSerde, jsonObjectSerde))
                 .peek((k, v) -> LOGGER.info(String.format("order.info [%s] = [%s]", k, v)))
                 .groupByKey()
-                .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofMinutes(0)))
+                .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofSeconds(60), Duration.ofSeconds(60)))
                 .aggregate(
                         JsonObject::new,
-                        (key, jsonObject, aggregateJsonObject) -> {
-                            // if the aggregated order info object is empty, use the order info object
-                            if (aggregateJsonObject.size() == 0) {
-                                JsonElement jsonElement = jsonObject.get("event.type");
-                                if (jsonElement == null) {
-                                    // bad message, ignore
-                                    return null;
-                                }
-
-                                if ("facility.info".equals(jsonElement.getAsString())) {
-                                    String facilityId = jsonObject.get("facility.id").getAsString();
-                                    long processingCount = 1;
-                                    long processingMs = jsonObject.get("processing.ms").getAsLong();
-
-                                    JsonObject result = new JsonObject();
-                                    result.addProperty("event.type", "facility.info");
-                                    result.addProperty("facility.id", facilityId);
-                                    result.addProperty("processing.count", processingCount);
-                                    result.addProperty("processing.ms", processingMs);
-                                    return result;
-                                }
-
-                                // unknown message, ignore
-                                return null;
-                            }
-
-                            String facilityId = jsonObject.get("facility.id").getAsString();
-
-                            long processingCount = aggregateJsonObject.get("processing.count").getAsLong() + 1;
-
-                            long processingMs =
-                                    jsonObject.get("processing.ms").getAsLong()
-                                        + aggregateJsonObject.get("processing.ms").getAsLong();
-
+                        (k, v, a) -> {
                             JsonObject result = new JsonObject();
                             result.addProperty("event.type", "facility.info");
-                            result.addProperty("facility.id", facilityId);
-                            result.addProperty("processing.count", processingCount);
-                            result.addProperty("processing.ms", processingMs);
+                            result.addProperty("facility.id", k);
 
+                            if (a.size() > 0) {
+                                // aggregate
+                                long processingCount = 1;
+                                long processingMs = v.get("processing.ms").getAsLong();
+
+                                long aggregateProcessingCount = a.get("processing.count").getAsLong();
+                                long aggregateProcessingMs = a.get("processing.ms").getAsLong();
+
+                                aggregateProcessingCount += processingCount;
+                                aggregateProcessingMs += processingMs;
+
+                                result.addProperty("processing.count", aggregateProcessingCount);
+                                result.addProperty("processing.ms", aggregateProcessingMs);
+                            } else {
+                                // set up the initial aggregate
+                                long processingCount = 1;
+                                long processingMs = v.get("processing.ms").getAsLong();
+
+                                result.addProperty("processing.count", processingCount);
+                                result.addProperty("processing.ms", processingMs);
+                            }
                             return result;
                         }, Materialized.as("facility-info-state-store"))
-                .filter((string, jsonObject) -> jsonObject != null)
+                .filter((k, v) -> v != null)
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded().shutDownWhenFull()))
                 .toStream()
                 .map((w, v) -> KeyValue.pair(w.key(), v))
                 .peek((k, v) -> LOGGER.info(String.format("facility.info [%s] = [%s]", k, v)))
-                .to("facility-info-by-minute", Produced.with(keySerdes, valueSerdes).as("facility-info-by-minute"));
+                .to("facility-info-by-minute", Produced.with(stringSerde, jsonObjectSerde).as("facility-info-by-minute"));
 
         return streamsBuilder.build();
     }
