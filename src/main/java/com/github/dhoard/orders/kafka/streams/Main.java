@@ -17,11 +17,14 @@ import org.apache.kafka.streams.kstream.Suppressed;
 import org.apache.kafka.streams.kstream.TimeWindows;
 import org.apache.kafka.streams.processor.StateRestoreListener;
 import org.apache.kafka.streams.processor.WallclockTimestampExtractor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.api.Record;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
 import java.util.Properties;
+import java.util.function.BiConsumer;
 
 public class Main {
 
@@ -80,6 +83,7 @@ public class Main {
             new StateRestoreListener() {
                 @Override
                 public void onRestoreStart(TopicPartition topicPartition, String storeName, long startingOffset, long endingOffset) {
+                    /*
                     LOGGER.info(
                             String.format(
                                     "onRestoreStart() topicPartition [%s] storeName [%s] startingOffset [%d] endingOffset [%d]",
@@ -87,6 +91,7 @@ public class Main {
                                     storeName,
                                     startingOffset,
                                     endingOffset));
+                     */
                 }
 
                 @Override
@@ -96,12 +101,14 @@ public class Main {
 
                 @Override
                 public void onRestoreEnd(TopicPartition topicPartition, String storeName, long totalRestored) {
-                    LOGGER.info(
-                            String.format(
-                                    "onRestoreEnd() topicPartition [%s] storeName [%s] totalRestored [%d]",
-                                    topicPartition.partition(),
-                                    storeName,
-                                    totalRestored));
+                    if (totalRestored > 0) {
+                        LOGGER.info(
+                                String.format(
+                                        "onRestoreEnd() topicPartition [%s] storeName [%s] totalRestored [%d]",
+                                        topicPartition.partition(),
+                                        storeName,
+                                        totalRestored));
+                    }
                 }
             }
         );
@@ -163,7 +170,7 @@ public class Main {
                             long processingMs = v.get("processing.ms").getAsLong();
 
                             if (a.size() > 0) {
-                                // aggregate
+                                // previous aggregate
                                 long aggregateProcessingCount = a.get("processing.count").getAsLong();
                                 long aggregateProcessingMs = a.get("processing.ms").getAsLong();
 

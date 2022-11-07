@@ -28,32 +28,6 @@ import java.util.Set;
 public class OrderProcessor implements Processor<String, JsonObject, String, JsonObject> {
 
     /**
-     * Method to return a ProcessorSupplier to create the OrderProcessor
-     *
-     * @return
-     */
-    public static ProcessorSupplier<String, JsonObject, String, JsonObject> supplier() {
-
-        return new ProcessorSupplier<>() {
-            @Override
-            public Processor<String, JsonObject, String, JsonObject> get() {
-                return new OrderProcessor();
-            }
-
-            public Set<StoreBuilder<?>> stores() {
-                StoreBuilder<?> storeBuilder =
-                        Stores
-                                .keyValueStoreBuilder(
-                                        Stores.persistentKeyValueStore(OrderProcessor.STATE_STORE),
-                                        Serdes.String(),
-                                        new JsonObjectSerde());
-
-                return Collections.singleton(storeBuilder);
-            }
-        };
-    }
-
-    /**
      * Logger
      */
     private static final Logger LOGGER = LoggerFactory.getLogger(OrderProcessor.class);
@@ -61,13 +35,13 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
     /**
      * State store name
      */
-    public final static String STATE_STORE = "order-state-store";
+    private final static String STATE_STORE = "order-state-store";
 
     /**
      * Maximum processing windows (i.e. how long to wait for an "order.fulfilled"
      * event to arrive after an "order.placed" event arrives
      */
-    public static final int PROCESSING_WINDOW_MS = 86400000; // 24 hours
+    private static final int PROCESSING_WINDOW_MS = 86400000; // 24 hours
 
     /**
      * Processor context
@@ -94,8 +68,8 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
     @Override
     public void init(ProcessorContext<String, JsonObject> processorContext) {
         this.processorContext = processorContext;
-        this.processorContext.schedule(Duration.ofMinutes(1), PunctuationType.WALL_CLOCK_TIME, new OrderPunctuator(this));
         this.keyValueStore = processorContext.getStateStore(STATE_STORE);
+        this.processorContext.schedule(Duration.ofMinutes(1), PunctuationType.WALL_CLOCK_TIME, new OrderPunctuator(this));
     }
 
     /**
@@ -178,11 +152,21 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
                         // we are past the processing window (i.e. an "order.fulfilled" event didn't arrive in time)
                         LOGGER.info(String.format("order.placed without order.fulfilled ... deleting"));
                         // TODO send to topic for unmatched "order.placed" and "order.fulfilled" events
+                        // TODO should this be a forward with a tombstone?
                         keyValueStore.delete(keyValue.key);
                     }
                 }
             }
         }
+    }
+
+    /**
+     * Method to return a ProcessorSupplier to create the OrderProcessor
+     *
+     * @return
+     */
+    public static ProcessorSupplier<String, JsonObject, String, JsonObject> supplier() {
+        return new OrderProcessorSupplier();
     }
 
     /**
@@ -212,6 +196,25 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
         @Override
         public void punctuate(long timestamp) {
             processor.cleanup(timestamp);
+        }
+    }
+
+    private static class OrderProcessorSupplier implements ProcessorSupplier<String, JsonObject, String, JsonObject> {
+
+        @Override
+        public Processor<String, JsonObject, String, JsonObject> get() {
+            return new OrderProcessor();
+        }
+
+        public Set<StoreBuilder<?>> stores() {
+            StoreBuilder<?> storeBuilder =
+                    Stores
+                            .keyValueStoreBuilder(
+                                    Stores.persistentKeyValueStore(OrderProcessor.STATE_STORE),
+                                    Serdes.String(),
+                                    new JsonObjectSerde());
+
+            return Collections.singleton(storeBuilder);
         }
     }
 }

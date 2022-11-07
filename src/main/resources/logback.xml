@@ -7,7 +7,7 @@
     </appender>
 
     <logger name="com.github.dhoard.orders.kafka.streams.Main" level="INFO"/>
-    <logger name="com.github.dhoard.orders.kafka.streams.OrderProcessor" level="INFO"/>
+    <logger name="com.github.dhoard.orders.kafka.streams.GenericProcessor" level="INFO"/>
 
     <root level="WARN">
         <appender-ref ref="STDOUT" />
