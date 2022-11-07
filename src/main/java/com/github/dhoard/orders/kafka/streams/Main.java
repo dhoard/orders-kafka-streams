@@ -1,3 +1,19 @@
+/*
+ * Copyright 2022 Douglas Hoard
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package com.github.dhoard.orders.kafka.streams;
 
 import com.github.dhoard.orders.kafka.streams.serde.JsonObjectSerde;
@@ -83,7 +99,6 @@ public class Main {
             new StateRestoreListener() {
                 @Override
                 public void onRestoreStart(TopicPartition topicPartition, String storeName, long startingOffset, long endingOffset) {
-                    /*
                     LOGGER.info(
                             String.format(
                                     "onRestoreStart() topicPartition [%s] storeName [%s] startingOffset [%d] endingOffset [%d]",
@@ -91,7 +106,6 @@ public class Main {
                                     storeName,
                                     startingOffset,
                                     endingOffset));
-                     */
                 }
 
                 @Override
@@ -189,7 +203,10 @@ public class Main {
                 .filter((k, v) -> v != null)
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded().shutDownWhenFull()))
                 .toStream()
-                .map((w, v) -> KeyValue.pair(w.key(), v))
+                .map((w, v) -> {
+                    v.addProperty("event.timestamp", w.window().endTime().toEpochMilli());
+                    return KeyValue.pair(w.key(), v);
+                })
                 .peek((k, v) -> LOGGER.info(String.format("facility.info [%s] = [%s]", k, v)))
                 .to("facility-info-by-minute");
 
