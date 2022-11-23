@@ -1,0 +1,16 @@
+<!-- this file goes in src/main/resources/logback.xml -->
+<configuration>
+    <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d [%thread] %-5level %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <logger name="com.github.dhoard.orders.kafka.streams.Main" level="INFO"/>
+    <logger name="com.github.dhoard.orders.kafka.streams.GenericProcessor" level="INFO"/>
+
+    <root level="WARN">
+        <appender-ref ref="STDOUT" />
+    </root>
+
+</configuration>
