@@ -16,11 +16,9 @@
 
 package com.github.dhoard.orders.kafka.streams;
 
-import com.github.dhoard.kafka.serde.gson.JsonObjectSerde;
-import com.google.gson.JsonObject;
+import io.confluent.kafka.streams.serdes.json.KafkaJsonSchemaSerde;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.TopicPartition;
-import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
@@ -30,6 +28,7 @@ import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.errors.LogAndContinueExceptionHandler;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.Materialized;
+import org.apache.kafka.streams.kstream.Produced;
 import org.apache.kafka.streams.kstream.Suppressed;
 import org.apache.kafka.streams.kstream.TimeWindows;
 import org.apache.kafka.streams.processor.StateRestoreListener;
@@ -38,15 +37,31 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Properties;
 
 public class Main {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(Main.class);
 
-    private static final Serde<String> stringSerde = Serdes.String();
+    private static final String SCHEMA_REGISTRY_URL_CONFIG = "schema.registry.url";
 
-    private static final Serde<JsonObject> jsonObjectSerde = new JsonObjectSerde();
+    // Configuration
+    private static final String BOOTSTRAP_SERVERS = "cp-7-4-x:9092";
+    private static final String APPLICATION_ID = "orders";
+    private static final int NUM_STREAM_THREADS = Runtime.getRuntime().availableProcessors() * 2;
+    private static final int CACHE_MAX_BYTES = 0;
+    private static final String AUTO_OFFSET_RESET_CONFIG = "earliest";
+    private static final String STATE_DIR = "/tmp/state";
+    private static final String SCHEMA_REGISTRY_URL = "http://cp-7-4-x:8081";
+    private static final String TOPIC = "order";
+    public static final String CACHE_MAX_BYTES_CONFIG = "cache.max.bytes";
+
+    private Serdes.StringSerde keySerde = new Serdes.StringSerde();
+    private KafkaJsonSchemaSerde<OrderEvent> orderEventSerde;
+    private KafkaJsonSchemaSerde<OrderInfoEvent> orderInfoEventSerde;
+    private KafkaJsonSchemaSerde<FacilityInfoEvent> facilityInfoEventSerde;
 
     public static void main(String[] args) {
         new Main().run();
@@ -55,40 +70,38 @@ public class Main {
     public void run() {
         LOGGER.info("Application starting");
 
-        String bootstrapServers = "cp-7-2-x:9092";
-        String applicationId = "orders";
-        Class<?> keySerde = stringSerde.getClass();
-        Class<?> valueSerde = jsonObjectSerde.getClass();
-        String autoOffsetResetConfig = "earliest";
-        int numStreamThreads = Runtime.getRuntime().availableProcessors() * 2;
-        long cacheMaxBytesBuffering = 0;
-        String stateDir = "/tmp/state";
-
-        LOGGER.info("bootstrapServers       = [" + bootstrapServers + "]");
-        LOGGER.info("autoOffsetResetConfig  = [" + autoOffsetResetConfig + "]");
-        LOGGER.info("applicationId          = [" + applicationId + "]");
-        LOGGER.info("defaultKeySerde        = [" + keySerde + "]");
-        LOGGER.info("defaultValueSerde      = [" + valueSerde + "]");
-        LOGGER.info("numStreamThreads       = [" + numStreamThreads + "]");
-        LOGGER.info("cacheMaxBytesBuffering = [" + cacheMaxBytesBuffering + "]");
-        LOGGER.info("stateDir               = [" + stateDir + "]");
+        LOGGER.info("bootstrapServers       = [" + BOOTSTRAP_SERVERS + "]");
+        LOGGER.info("applicationId          = [" + APPLICATION_ID + "]");
+        LOGGER.info("autoOffsetResetConfig  = [" + AUTO_OFFSET_RESET_CONFIG + "]");
+        LOGGER.info("numStreamThreads       = [" + NUM_STREAM_THREADS + "]");
+        LOGGER.info("cacheMaxBytesBuffering = [" + CACHE_MAX_BYTES + "]");
+        LOGGER.info("stateDir               = [" + STATE_DIR + "]");
 
         Properties properties = new Properties();
         
-        properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        properties.put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
-        properties.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, keySerde);
-        properties.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, valueSerde);
-        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, autoOffsetResetConfig);
+        properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
+        properties.put(StreamsConfig.APPLICATION_ID_CONFIG, APPLICATION_ID);
+        properties.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, AUTO_OFFSET_RESET_CONFIG);
         properties.put(StreamsConfig.DEFAULT_TIMESTAMP_EXTRACTOR_CLASS_CONFIG, WallclockTimestampExtractor.class);
-        properties.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, numStreamThreads);
-        properties.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, cacheMaxBytesBuffering);
-        properties.put(StreamsConfig.STATE_DIR_CONFIG, stateDir);
+        properties.put(StreamsConfig.NUM_STREAM_THREADS_CONFIG, NUM_STREAM_THREADS);
+        properties.put(CACHE_MAX_BYTES_CONFIG, CACHE_MAX_BYTES);
+        properties.put(StreamsConfig.STATE_DIR_CONFIG, STATE_DIR);
         properties.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
         properties.put("default.deserialization.exception.handler", LogAndContinueExceptionHandler.class);
+        properties.put(SCHEMA_REGISTRY_URL_CONFIG, SCHEMA_REGISTRY_URL);
+
+        keySerde = new Serdes.StringSerde();
+        orderEventSerde = createOrderEventSerde(properties);
+        orderInfoEventSerde = createOrderInfoEventSerde(properties);
+        facilityInfoEventSerde = createFacilityInfoEventSerde(properties);
 
         Topology topology = buildTopology();
-        LOGGER.info(topology.describe().toString());
+        LOGGER.info(
+                "topologies..."
+                        + System.lineSeparator()
+                        + System.lineSeparator()
+                        + topology.describe().toString().trim()
+                        + System.lineSeparator());
         
         KafkaStreams kafkaStreams = new KafkaStreams(topology, properties);
         Runtime.getRuntime().addShutdownHook(new Thread(kafkaStreams::close));
@@ -131,79 +144,79 @@ public class Main {
     private Topology buildTopology() {
         StreamsBuilder streamsBuilder = new StreamsBuilder();
 
-        // re-key order events (("order.placed" and "order.fulfilled") without a key to
+        // re-key order events ("order.placed" and "order.fulfilled") without a key to
         // order events keyed by "order.id"
         streamsBuilder
-                .stream("order", Consumed.with(stringSerde, jsonObjectSerde))
+                .stream(TOPIC, Consumed.with(keySerde, orderEventSerde))
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
-                .map((k, v) -> new KeyValue<>(v.get("order.id").getAsString(), v))
-                .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
-                .to("order-keyed");
+                .map((k, v) -> new KeyValue<>(v.orderId, v))
+                .to("order-keyed-by-order-id", Produced.with(keySerde, orderEventSerde));
 
         // aggregate order events ("order.placed" + "order.fulfilled") and
         // output an "order.info" event, keyed by "order.id"
         streamsBuilder
-                .stream("order-keyed", Consumed.with(stringSerde, jsonObjectSerde))
+                .stream("order-keyed-by-order-id", Consumed.with(keySerde, orderEventSerde))
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
                 .process(OrderProcessor.supplier())
                 .peek((k, v) -> LOGGER.info(String.format("order [%s] = [%s]", k, v)))
-                .to("order-info");
+                .to("order-info", Produced.with(keySerde, orderInfoEventSerde));
 
-        // convert "order.info" events to into "facility.info" events, keyed by "facility.id"
+        // re-key "order.info" events by "facility.id"
         streamsBuilder
-                .stream("order-info", Consumed.with(stringSerde, jsonObjectSerde))
+                .stream("order-info", Consumed.with(keySerde, orderInfoEventSerde))
                 .peek((k, v) -> LOGGER.info(String.format("order.info [%s] = [%s]", k, v)))
-                .map((k, v) -> {
-                    // re-key based on facility id
-                    v.addProperty("event.type", "facility.info");
-                    return new KeyValue<>(v.get("facility.id").getAsString(), v);
-                })
-                .peek((k, v) -> LOGGER.info(String.format("facility.info [%s] = [%s]", k, v)))
-                .to("facility-info");
+                .map((k, v) -> new KeyValue<>(v.facilityId, v))
+                .peek((k, v) -> LOGGER.info(String.format("order.info [%s] = [%s]", k, v)))
+                .to("order-info-keyed-by-facility-id", Produced.with(keySerde, orderInfoEventSerde));
 
-        // aggregate "facility.info" events by "facility.id" with a 1-minute tumbling window
+        // aggregate "order.info" events by "facility.id" with a 1-minute tumbling window
         streamsBuilder
-                .stream("facility-info", Consumed.with(stringSerde, jsonObjectSerde))
+                .stream("order-info-keyed-by-facility-id", Consumed.with(keySerde, orderInfoEventSerde))
                 .peek((k, v) -> LOGGER.info(String.format("order.info [%s] = [%s]", k, v)))
                 .groupByKey()
-                .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofSeconds(60), Duration.ofSeconds(60)))
+                .windowedBy(TimeWindows.ofSizeAndGrace(Duration.ofMinutes(1), Duration.ofMinutes(1)))
                 .aggregate(
-                        JsonObject::new,
-                        (k, v, a) -> {
-                            JsonObject result = new JsonObject();
-                            result.addProperty("event.type", "facility.info");
-                            result.addProperty("facility.id", k);
-
-                            long processingCount = 1;
-                            long processingMs = v.get("processing.ms").getAsLong();
-
-                            if (a.size() > 0) {
-                                // previous aggregate
-                                long aggregateProcessingCount = a.get("processing.count").getAsLong();
-                                long aggregateProcessingMs = a.get("processing.ms").getAsLong();
-
-                                aggregateProcessingCount += processingCount;
-                                aggregateProcessingMs += processingMs;
-
-                                result.addProperty("processing.count", aggregateProcessingCount);
-                                result.addProperty("processing.ms", aggregateProcessingMs);
-                            } else {
-                                // set up the initial aggregate
-                                result.addProperty("processing.count", processingCount);
-                                result.addProperty("processing.ms", processingMs);
-                            }
-                            return result;
-                        }, Materialized.as("facility-info-state-store"))
+                        FacilityInfoEvent::new,
+                        (k, v, va) -> {
+                            va.processingCount += 1;
+                            va.processingMs += v.processingMs;
+                            return va;
+                        },
+                        Materialized.as("facility-info-state-store").with(keySerde, facilityInfoEventSerde))
                 .filter((k, v) -> v != null)
                 .suppress(Suppressed.untilWindowCloses(Suppressed.BufferConfig.unbounded().shutDownWhenFull()))
                 .toStream()
                 .map((w, v) -> {
-                    v.addProperty("event.timestamp", w.window().endTime().toEpochMilli());
+                    v.eventTimestamp = w.window().endTime().toEpochMilli();
                     return KeyValue.pair(w.key(), v);
                 })
                 .peek((k, v) -> LOGGER.info(String.format("facility.info [%s] = [%s]", k, v)))
-                .to("facility-info-by-minute");
+                .to("facility-info-by-minute", Produced.with(keySerde, facilityInfoEventSerde));
 
         return streamsBuilder.build();
+    }
+
+    private static KafkaJsonSchemaSerde<OrderEvent> createOrderEventSerde(Properties properties) {
+        KafkaJsonSchemaSerde<OrderEvent> serde = new KafkaJsonSchemaSerde<>(OrderEvent.class);
+        Map<String, Object> serdeConfiguration = new HashMap<>();
+        serdeConfiguration.put(SCHEMA_REGISTRY_URL_CONFIG, properties.getProperty(SCHEMA_REGISTRY_URL_CONFIG));
+        serde.configure(serdeConfiguration, false);
+        return serde;
+    }
+
+    private static KafkaJsonSchemaSerde<OrderInfoEvent> createOrderInfoEventSerde(Properties properties) {
+        KafkaJsonSchemaSerde<OrderInfoEvent> serde = new KafkaJsonSchemaSerde<>(OrderInfoEvent.class);
+        Map<String, Object> serdeConfiguration = new HashMap<>();
+        serdeConfiguration.put(SCHEMA_REGISTRY_URL_CONFIG, properties.getProperty(SCHEMA_REGISTRY_URL_CONFIG));
+        serde.configure(serdeConfiguration, false);
+        return serde;
+    }
+
+    private static KafkaJsonSchemaSerde<FacilityInfoEvent> createFacilityInfoEventSerde(Properties properties) {
+        KafkaJsonSchemaSerde<FacilityInfoEvent> serde = new KafkaJsonSchemaSerde<>(FacilityInfoEvent.class);
+        Map<String, Object> serdeConfiguration = new HashMap<>();
+        serdeConfiguration.put(SCHEMA_REGISTRY_URL_CONFIG, properties.getProperty(SCHEMA_REGISTRY_URL_CONFIG));
+        serde.configure(serdeConfiguration, false);
+        return serde;
     }
 }

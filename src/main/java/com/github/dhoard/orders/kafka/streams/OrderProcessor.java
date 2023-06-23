@@ -16,8 +16,6 @@
 
 package com.github.dhoard.orders.kafka.streams;
 
-import com.github.dhoard.kafka.serde.gson.JsonObjectSerde;
-import com.google.gson.JsonObject;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.processor.PunctuationType;
@@ -43,7 +41,7 @@ import java.util.Set;
  *
  * Designed to encapsulate the processor and punctuator
  */
-public class OrderProcessor implements Processor<String, JsonObject, String, JsonObject> {
+public class OrderProcessor implements Processor<String, OrderEvent, String, OrderInfoEvent> {
 
     /**
      * Logger
@@ -64,12 +62,12 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
     /**
      * Processor context
      */
-    private ProcessorContext<String, JsonObject> processorContext;
+    private ProcessorContext<String, OrderInfoEvent> processorContext;
 
     /**
      * KeyValue store used to store aggregate order event
      */
-    private KeyValueStore<String, JsonObject> keyValueStore;
+    private KeyValueStore<String, OrderEventAggregate> keyValueStore;
 
     /**
      * Constructor
@@ -84,7 +82,7 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
      * @param processorContext
      */
     @Override
-    public void init(ProcessorContext<String, JsonObject> processorContext) {
+    public void init(ProcessorContext<String, OrderInfoEvent> processorContext) {
         this.processorContext = processorContext;
         this.keyValueStore = processorContext.getStateStore(STATE_STORE_NAME);
         this.processorContext.schedule(Duration.ofMinutes(1), PunctuationType.WALL_CLOCK_TIME, new OrderPunctuator(this));
@@ -96,26 +94,26 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
      * @param record
      */
     @Override
-    public void process(Record<String, JsonObject> record) {
+    public void process(Record<String, OrderEvent> record) {
         String orderId = record.key();
-        JsonObject orderEvent = record.value();
+        OrderEvent orderEvent = record.value();
 
         // get the previous aggregate
-        JsonObject aggregateOrderEvent = keyValueStore.get(orderId);
-        if (aggregateOrderEvent == null) {
+        OrderEventAggregate orderEventAggregate = keyValueStore.get(orderId);
+        if (orderEventAggregate == null) {
             // create a new aggregate order event
-            aggregateOrderEvent = new JsonObject();
+            orderEventAggregate = new OrderEventAggregate();
         }
 
         // add the order event to the aggregate order event
-        String eventType = orderEvent.get("event.type").getAsString();
+        String eventType = orderEvent.eventType;
         switch (eventType) {
             case "order.placed": {
-                aggregateOrderEvent.add("order.placed", orderEvent);
+                orderEventAggregate.orderPlacedEvent = orderEvent;
                 break;
             }
             case "order.fulfilled": {
-                aggregateOrderEvent.add("order.fulfilled", orderEvent);
+                orderEventAggregate.orderFulfilledEvent = orderEvent;
                 break;
             }
             default: {
@@ -125,22 +123,24 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
         }
 
         // completion criteria
-        if (isComplete(aggregateOrderEvent)) {
-            JsonObject orderPlacedEvent = aggregateOrderEvent.getAsJsonObject("order.placed");
-            JsonObject orderFulfilledEvent = aggregateOrderEvent.getAsJsonObject("order.fulfilled");
+        if (orderEventAggregate.isComplete()) {
+            /*
+            LOGGER.info(
+                    "OrderEventAggregate for orderId [%s] is complete",
+                    orderEventAggregate.orderPlacedEvent.orderId));
+             */
 
-            String facilityId = orderFulfilledEvent.get("facility.id").getAsString();
+            OrderEvent orderPlacedEvent = orderEventAggregate.orderPlacedEvent;
+            OrderEvent orderFulfilledEvent = orderEventAggregate.orderFulfilledEvent;
 
-            long orderPlacedTimestamp = orderPlacedEvent.get("event.timestamp").getAsLong();
-            long orderFulfilledTimestamp = orderFulfilledEvent.get("event.timestamp").getAsLong();
-            long orderProcessingTimeMilliseconds = orderFulfilledTimestamp - orderPlacedTimestamp;
+            String facilityId = orderFulfilledEvent.facilityId;
 
-            // build an "order.info" event
-            JsonObject orderInfoEvent = new JsonObject();
-            orderInfoEvent.addProperty("event.type", "order.info");
-            orderInfoEvent.addProperty("facility.id", facilityId);
-            orderInfoEvent.addProperty("order.id", orderId);
-            orderInfoEvent.addProperty("processing.ms", orderProcessingTimeMilliseconds);
+            long orderPlacedTimestamp = orderPlacedEvent.eventTimestamp;
+            long orderFulfilledTimestamp = orderFulfilledEvent.eventTimestamp;
+            long processingMs = orderFulfilledTimestamp - orderPlacedTimestamp;
+
+            OrderInfoEvent orderInfoEvent =
+                    new OrderInfoEvent(System.currentTimeMillis(), orderId, facilityId, processingMs);
 
             // forward the "order.info" event to the next processor
             processorContext.forward(new Record<>(orderId, orderInfoEvent, System.currentTimeMillis()));
@@ -148,8 +148,14 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
             // delete the aggregate order event from the state store
             keyValueStore.delete(orderId);
         } else {
+            /*
+            LOGGER.info(
+                    "OrderEventAggregate for orderId [%s] is incomplete",
+                    orderEventAggregate.orderPlacedEvent.orderId);
+            */
+
             // store the aggregate order event in the state store
-            keyValueStore.put(orderId, aggregateOrderEvent);
+            keyValueStore.put(orderId, orderEventAggregate);
         }
     }
 
@@ -159,44 +165,27 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
      * @param timestamp
      */
     private void cleanup(long timestamp) {
-        try (KeyValueIterator<String, JsonObject> keyValueIterator = keyValueStore.all()) {
+        try (KeyValueIterator<String, OrderEventAggregate> keyValueIterator = keyValueStore.all()) {
             while (keyValueIterator.hasNext()) {
-                KeyValue<String, JsonObject> keyValue = keyValueIterator.next();
+                KeyValue<String, OrderEventAggregate> keyValue = keyValueIterator.next();
                 String orderId = keyValue.key;
-                JsonObject aggregateOrderEvent = keyValue.value;
+                OrderEventAggregate orderEventAggregate = keyValue.value;
 
                 // aggregated order events that are complete (i.e. have an "order.placed"
                 // and "order.fulfilled") are handled in the processor
 
-                if (aggregateOrderEvent.has("order.placed")
-                        && !aggregateOrderEvent.has("order.fulfilled")) {
+                if (!orderEventAggregate.isComplete()) {
+                    long eventTimestamp = 0;
 
-                    // aggregated order event is missing the "order.fulfilled" event
-                    long eventTimestamp = aggregateOrderEvent
-                            .get("order.placed")
-                            .getAsJsonObject()
-                            .get("event.timestamp")
-                            .getAsLong();
-
-                    if (Math.abs(timestamp - eventTimestamp) > PROCESSING_WINDOW_MILLISECONDS) {
-                        // we are past the processing window (i.e. an "order.fulfilled" event didn't arrive in time)
-                        LOGGER.info(String.format("order.placed without order.fulfilled ... deleting"));
-                        // TODO send to topic for unmatched "order.placed" / "order.fulfilled" events
-                        keyValueStore.delete(orderId);
+                    if (orderEventAggregate.orderPlacedEvent != null) {
+                        eventTimestamp = orderEventAggregate.orderPlacedEvent.eventTimestamp;
+                    } else {
+                        eventTimestamp = orderEventAggregate.orderFulfilledEvent.eventTimestamp;
                     }
-                } else if (!aggregateOrderEvent.has("order.placed")
-                        && aggregateOrderEvent.has("order.fulfilled")) {
-
-                    // aggregated order event is missing the "order.placed" event
-                    long eventTimestamp = aggregateOrderEvent
-                            .get("order.fulfilled")
-                            .getAsJsonObject()
-                            .get("event.timestamp")
-                            .getAsLong();
 
                     if (Math.abs(timestamp - eventTimestamp) > PROCESSING_WINDOW_MILLISECONDS) {
-                        // we are past the processing window (i.e. an "order.fulfilled" event didn't arrive in time)
-                        LOGGER.info(String.format("order.fulfilled without order.placed ... deleting"));
+                        // we are past the processing window
+                        LOGGER.info(String.format("purging incomplete OrderEventAggregate"));
                         // TODO send to topic for unmatched "order.placed" / "order.fulfilled" events
                         keyValueStore.delete(orderId);
                     }
@@ -206,23 +195,11 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
     }
 
     /**
-     * Method to check if the aggregate order event is complete
-     *
-     * @param aggregateOrderEvent
-     *
-     * @return
-     */
-    private boolean isComplete(JsonObject aggregateOrderEvent) {
-        return aggregateOrderEvent.has("order.placed")
-                && aggregateOrderEvent.has("order.fulfilled");
-    }
-
-    /**
      * Method to create a ProcessorSupplier to supply the OrderProcessor
      *
      * @return
      */
-    public static ProcessorSupplier<String, JsonObject, String, JsonObject> supplier() {
+    public static ProcessorSupplier<String, OrderEvent, String, OrderInfoEvent> supplier() {
         return new OrderProcessorSupplier();
     }
 
@@ -259,7 +236,8 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
     /**
      * ProcessSupplier to create an OrderProcessor
      */
-    private static class OrderProcessorSupplier implements ProcessorSupplier<String, JsonObject, String, JsonObject> {
+    private static class OrderProcessorSupplier
+            implements ProcessorSupplier<String, OrderEvent, String, OrderInfoEvent> {
 
         /**
          * Method to get (create) an OrderProcessor
@@ -267,7 +245,7 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
          * @return
          */
         @Override
-        public Processor<String, JsonObject, String, JsonObject> get() {
+        public Processor<String, OrderEvent, String, OrderInfoEvent> get() {
             return new OrderProcessor();
         }
 
@@ -282,7 +260,7 @@ public class OrderProcessor implements Processor<String, JsonObject, String, Jso
                             .keyValueStoreBuilder(
                                     Stores.persistentKeyValueStore(OrderProcessor.STATE_STORE_NAME),
                                     Serdes.String(),
-                                    new JsonObjectSerde());
+                                    new OrderEventAggregateSerde());
 
             return Collections.singleton(storeBuilder);
         }
